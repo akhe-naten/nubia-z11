@@ -1,0 +1,55 @@
+#!/bin/sh
+# Nubia Z11 (NX531J) 最小 initramfs 启动脚本
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export HOME=/root
+
+/bin/mount -t proc     none /proc  2>/dev/null
+/bin/mount -t sysfs    none /sys   2>/dev/null
+/bin/mount -t devtmpfs none /dev   2>/dev/null
+/bin/mount -t tmpfs    none /tmp   2>/dev/null
+mkdir -p /dev/pts /run
+/bin/mount -t devpts   none /dev/pts 2>/dev/null
+
+{
+    echo ""
+    echo "=================================================="
+    echo "  Nubia Z11 (NX531J) - mainline Linux bootstrap"
+    echo "=================================================="
+    /bin/cat /proc/version
+    echo -n "model : "; /bin/cat /proc/device-tree/model 2>/dev/null; echo ""
+    echo -n "cmdline: "; /bin/cat /proc/cmdline; echo ""
+    echo ""
+    /bin/grep -E "MemTotal|MemAvailable" /proc/meminfo
+    echo ""
+    echo "--- platform devices ---"
+    /bin/ls /sys/bus/platform/devices/ 2>/dev/null | /usr/bin/head -40
+    echo "=================================================="
+} > /dev/console 2>&1
+
+# 尝试建立 USB 网络（若内核内置了 gadget 支持），便于主机 ssh/telnet 接入
+(
+    modprobe libcomposite 2>/dev/null
+    modprobe usb_f_ecm 2>/dev/null
+    G=/sys/kernel/config/usb_gadget/g1
+    if [ -d /sys/kernel/config ] && mkdir -p "$G" 2>/dev/null; then
+        cd "$G" || exit 1
+        echo 0x1d6b > idVendor
+        echo 0x0104 > idProduct
+        mkdir -p strings/0x409
+        echo "z11" > strings/0x409/serialnumber
+        echo "Nubia" > strings/0x409/manufacturer
+        echo "Z11 Linux" > strings/0x409/product
+        mkdir -p configs/c.1/strings/0x409
+        echo "ecm" > configs/c.1/strings/0x409/configuration
+        mkdir -p functions/ecm.usb0 2>/dev/null
+        ln -sf functions/ecm.usb0 configs/c.1/ 2>/dev/null
+        UDC=$(/bin/ls /sys/class/udc 2>/dev/null | /usr/bin/head -1)
+        [ -n "$UDC" ] && echo "$UDC" > UDC
+        /sbin/ip addr add 172.16.42.1/24 dev usb0 2>/dev/null
+        /sbin/ip link set usb0 up 2>/dev/null
+        echo "usb0: 172.16.42.1/24 (udc=$UDC)" > /dev/console
+        /usr/sbin/telnetd -l /bin/sh -p 23 2>/dev/null
+    fi
+) &
+
+exec /bin/sh -i </dev/console >/dev/console 2>&1

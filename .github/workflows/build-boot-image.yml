@@ -1,0 +1,62 @@
+name: build-boot-image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PMOS_KERNEL_URL: "https://mirror.postmarketos.org/postmarketos/master/aarch64/linux-postmarketos-qcom-msm8996-6.19.5-r0.apk"
+  ALPINE_TARBALL: "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq device-tree-compiler cpio
+
+      - name: 编译设备树
+        run: |
+          dtc -I dts -O dtb -o msm8996-nubia-z11.dtb dts/msm8996-nubia-z11.dts
+          ls -l msm8996-nubia-z11.dtb
+
+      - name: 获取 pmOS msm8996 内核
+        run: |
+          curl -sL -o kernel.apk "$PMOS_KERNEL_URL"
+          tar -xzf kernel.apk boot/vmlinuz
+          ls -l boot/vmlinuz
+
+      - name: 构建 initramfs
+        run: |
+          curl -sL -o alpine.tar.gz "$ALPINE_TARBALL"
+          mkdir -p rootfs
+          sudo tar -xzf alpine.tar.gz -C rootfs
+          sudo cp initramfs/init rootfs/init
+          sudo chmod 755 rootfs/init
+          ( cd rootfs && sudo find . -print0 | cpio --null -o --format=newc --quiet | gzip -9 ) > initramfs.cpio.gz
+          ls -l initramfs.cpio.gz
+
+      - name: 组装 boot.img（gz 内核 + 紧接 DTB，与原厂格式一致）
+        run: |
+          mkdir -p bi
+          cat boot/vmlinuz msm8996-nubia-z11.dtb > bi/kernel
+          cp initramfs.cpio.gz bi/ramdisk
+          python3 tools/bootimg.py pack bi boot-z11.img \
+            --page 4096 --header-version 0 \
+            --kernel-addr 0x80008000 --ramdisk-addr 0x81000000 --tags-addr 0x80000100 \
+            --cmdline "console=ttyMSM0,115200n8 console=tty0 loglevel=7 ignore_loglevel panic=10 root=/dev/ram0 rw init=/init"
+          sha256sum boot-z11.img | tee boot-z11.img.sha256
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-z11-${{ github.sha }}
+          path: |
+            boot-z11.img
+            boot-z11.img.sha256
+            msm8996-nubia-z11.dtb

@@ -1,0 +1,6 @@
+.secrets/
+*.img
+*.apk
+*.tar.gz
+build/
+__pycache__/
