@@ -98,7 +98,12 @@ jobs:
             --set-str LOCALVERSION "-postmarketos-qcom-msm8996" \
             -d LOCALVERSION_AUTO
           make ARCH=arm64 LLVM=1 olddefconfig
+          # setlocalversion 在浅克隆/非精确 tag 下会给版本追加 "+"（uname -r 变成
+          # 6.19.5-postmarketos-qcom-msm8996+），vermagic 与 pmOS 模块不匹配。
+          # 空的 .scmversion 让 setlocalversion 直接返回空串，版本串才能精确一致。
+          : > .scmversion
           grep -E "^CONFIG_(RMI4|INPUT_EVDEV|INPUT_TOUCHSCREEN|LOCALVERSION)" .config | tee -a ../build.log
+          echo "expect uname -r = $(make -s ARCH=arm64 kernelrelease 2>/dev/null || echo '?')" | tee -a ../build.log
 
       - name: 注入探针（INSTRUMENT=1 才做）
         run: |
