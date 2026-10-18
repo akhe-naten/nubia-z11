@@ -18,11 +18,11 @@ import sys
 EDITS = [
     # ---- gpiochip_add_data_with_key(): the silent window ------------------
     ("drivers/gpio/gpiolib.c", "ret = gpiodev_add_to_list_unlocked(gdev);",
-     "before", 'pr_info("Z11[gpio] 1 list base=%d ngpio=%u\\n", base, gc->ngpio);'),
+     "before", 'pr_info("Z11[gpio] 3 list base=%d ngpio=%u\\n", base, gc->ngpio);'),
     ("drivers/gpio/gpiolib.c", "ret = init_srcu_struct(&gdev->srcu);",
-     "before", 'pr_info("Z11[gpio] 2 srcu\\n");'),
+     "before", 'pr_info("Z11[gpio] 1 srcu\\n");'),
     ("drivers/gpio/gpiolib.c", "ret = init_srcu_struct(&gdev->desc_srcu);",
-     "before", 'pr_info("Z11[gpio] 3 desc_srcu\\n");'),
+     "before", 'pr_info("Z11[gpio] 2 desc_srcu\\n");'),
     ("drivers/gpio/gpiolib.c", "ret = gpiochip_set_names(gc);",
      "before", 'pr_info("Z11[gpio] 4 names\\n");'),
     ("drivers/gpio/gpiolib.c", "ret = gpiochip_init_valid_mask(gc);",
@@ -42,8 +42,8 @@ EDITS = [
      "before", 'pr_info("Z11[gpio] 11 add_irqchip\\n");'),
     ("drivers/gpio/gpiolib.c", "ret = gpiochip_add_irqchip(gc, lock_key, request_key);",
      "after", 'pr_info("Z11[gpio] 11b add_irqchip ret=%d\\n", ret);'),
-    ("drivers/gpio/gpiolib.c", "ret = gpiochip_setup_dev(gdev);",
-     "before", 'pr_info("Z11[gpio] 12 setup_dev initialized=%d\\n", gpiolib_initialized);'),
+    ("drivers/gpio/gpiolib.c", "if (gpiolib_initialized) {",
+     "after", 'pr_info("Z11[gpio] 12 setup_dev\\n");'),
 
     # ---- inside gpiochip_add_irqchip(): domain + chained handler ---------
     ("drivers/gpio/gpiolib.c", "if (gpiochip_hierarchy_is_hierarchical(gc)) {",
@@ -76,18 +76,21 @@ def main():
     root = sys.argv[1]
     cache = {}
     applied = 0
+    errors = []
 
     for rel, anchor, where, code in EDITS:
         path = os.path.join(root, rel)
         if path not in cache:
             if not os.path.exists(path):
-                sys.exit(f"missing file: {rel}")
+                errors.append(f"missing file: {rel}")
+                continue
             cache[path] = open(path, encoding="utf-8").read()
         text = cache[path]
 
         n = text.count(anchor)
         if n != 1:
-            sys.exit(f"anchor appears {n}x (expected 1) in {rel}:\n    {anchor}")
+            errors.append(f"anchor appears {n}x (expected 1) in {rel}:\n    {anchor}")
+            continue
 
         idx = text.find(anchor)
         ind = indent_of(text, idx)
@@ -99,6 +102,12 @@ def main():
             new = text[:le] + ind + code + "\n" + text[le:]
         cache[path] = new
         applied += 1
+
+    if errors:
+        print(f"{len(errors)} anchor problem(s):", file=sys.stderr)
+        for e in errors:
+            print("  " + e, file=sys.stderr)
+        sys.exit(1)
 
     for path, text in cache.items():
         open(path, "w", encoding="utf-8", newline="").write(text)
