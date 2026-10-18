@@ -31,8 +31,18 @@ if [ -f "$WS/k/arch/arm64/boot/Image.gz" ]; then
 	cp "$WS/k/arch/arm64/boot/Image.gz" "$OUT/Image.gz"
 fi
 
+# 内核配置回传：设备侧出问题时可以在工作站上逐项核对
+if [ -f "$WS/k/.config" ]; then
+	cp "$WS/k/.config" "$OUT/kernel.config"
+fi
+
 printf "sha=%s\nphase=%s\nresult=%s\ndate=%s\n" \
 	"${GITHUB_SHA:-local}" "$PHASE" "$RESULT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/META.txt"
+if [ -f "$WS/k/.config" ]; then
+	# 版本串单独列出，一眼可查，不必在 8000 行配置里翻
+	printf "uname_r=%s\nconfig_sha=%s\n" \
+		"${KREL:-unknown}" "$(sha256sum "$WS/k/.config" | cut -c1-16)" >> "$OUT/META.txt"
+fi
 
 # GITHUB_TOKEN is NOT exported into step scripts by default: the calling step
 # must pass env: GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

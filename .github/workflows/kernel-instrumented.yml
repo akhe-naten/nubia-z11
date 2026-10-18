@@ -24,6 +24,15 @@ on:
       - "configs/**"
       - ".github/workflows/kernel-instrumented.yml"
   workflow_dispatch:
+    inputs:
+      instrument:
+        description: "注入 bring-up 探针（排查用，默认关闭）"
+        type: boolean
+        default: false
+      clean:
+        description: "丢弃构建树缓存，从零冷编译（~25 分钟）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,6 +41,11 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    env:
+      # 目标版本串必须与 pmOS 的 linux-postmarketos-qcom-msm8996 模块包完全一致，
+      # 否则 /lib/modules/6.19.5-postmarketos-qcom-msm8996 下所有 .ko 都会被拒。
+      WANT_KREL: 6.19.5-postmarketos-qcom-msm8996
+      INSTRUMENT: ${{ inputs.instrument && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,14 +58,18 @@ jobs:
           set -eu
           chmod +x self/tools/ci/publish.sh
           echo "job started $(date -u +%FT%TZ)" > build.log
+          echo "instrument=${INSTRUMENT:-0} clean=${{ inputs.clean }}" | tee -a build.log
           self/tools/ci/publish.sh start running
 
       - name: 恢复内核构建树
         uses: actions/cache@v4
         with:
+          # clean=true 时换 key，直接落到 kbuild-v2-cold 的 restore-keys 上（必然 miss）
           path: k
-          key: kbuild-v1-${{ hashFiles('self/configs/*.config') }}
-          restore-keys: kbuild-v1-
+          key: ${{ inputs.clean && 'kbuild-v2-cold' || format('kbuild-v2-{0}', hashFiles('self/configs/*.config')) }}
+          restore-keys: |
+            kbuild-v2-cold-
+            kbuild-v2-
 
       - name: 依赖
         run: |
@@ -98,27 +116,33 @@ jobs:
             --set-str LOCALVERSION "-postmarketos-qcom-msm8996" \
             -d LOCALVERSION_AUTO
           make ARCH=arm64 LLVM=1 olddefconfig
-          # setlocalversion 在浅克隆/非精确 tag 下会给版本追加 "+"（uname -r 变成
-          # 6.19.5-postmarketos-qcom-msm8996+），vermagic 与 pmOS 模块不匹配。
-          # 空的 .scmversion 让 setlocalversion 直接返回空串，版本串才能精确一致。
-          : > .scmversion
+          # 版本串的第三层：setlocalversion 里有 `elif [ "${LOCALVERSION+set}" != "set" ]`，
+          # 只要 LOCALVERSION 这个 shell 变量“未设置”（哪怕 CONFIG_LOCALVERSION 已经
+          # 非空），它就会在末尾追加 "+"。.scmversion 只影响 git 探测，治不了这一层。
+          # 唯一可靠的做法：在 make 命令行上显式写出空的 LOCALVERSION=。
+          # 因此下面凡是问内核版本的地方，都必须带 LOCALVERSION=。
+          KREL="$(make -s ARCH=arm64 LOCALVERSION= kernelrelease)"
+          case "$KREL" in
+            "$WANT_KREL") echo "vermagic OK: $KREL" | tee -a ../build.log ;;
+            *)
+              echo "vermagic MISMATCH: got '$KREL' want '$WANT_KREL'" | tee -a ../build.log
+              exit 1
+              ;;
+          esac
           grep -E "^CONFIG_(RMI4|INPUT_EVDEV|INPUT_TOUCHSCREEN|LOCALVERSION)" .config | tee -a ../build.log
-          echo "expect uname -r = $(make -s ARCH=arm64 kernelrelease 2>/dev/null || echo '?')" | tee -a ../build.log
+          echo "KREL=$KREL" >> "$GITHUB_ENV"
 
-      - name: 注入探针（INSTRUMENT=1 才做）
+      - name: 注入探针（INSTRUMENT 输入为 true 才做）
+        # 刻意不 commit：探针保持为未提交改动，下一次命中缓存时用 checkout -- . 就能撤销。
+        # 脏树之所以不再有害，是因为编译全程都带 LOCALVERSION=，setlocalversion 直接短路。
         run: |
           set -eux
           cd k
           if [ "${INSTRUMENT:-0}" = "1" ]; then
             python3 ../self/tools/ci/instrument.py . 2>&1 | tee -a ../build.log
-            # 树脏会让 setlocalversion 给版本追加 "+"，破坏 vermagic，故提交掉
-            git config user.name "z11-ci"
-            git config user.email "z11-ci@users.noreply.github.com"
-            git add -A && git commit -q -m "bring-up probes (CI)"
           else
-            echo "production build: no instrumentation (clean tree -> vermagic matches pmOS modules)"
+            echo "production build: no instrumentation" | tee -a ../build.log
           fi
-          git status --short | head -3 | tee -a ../build.log
 
       - name: 发布（探针阶段）
         if: always()
@@ -130,8 +154,27 @@ jobs:
         run: |
           set -euo pipefail
           cd k
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 Image.gz 2>&1 | tee -a ../build.log
+          time make -j"$(nproc)" ARCH=arm64 LLVM=1 LOCALVERSION= Image.gz 2>&1 | tee -a ../build.log
           ls -l arch/arm64/boot/Image.gz | tee -a ../build.log
+
+          # 三重版本串闸门：命令行参数 -> kernelrelease -> vmlinux 里真实的 vermagic 串。
+          # 最后一道最关键：它验的是镜像里真被编进去的那个字符串，而不是 Make 的推导结果。
+          KREL="$(make -s ARCH=arm64 LOCALVERSION= kernelrelease)"
+          if [ "$KREL" != "$WANT_KREL" ]; then
+            echo "FAIL: kernelrelease='$KREL' != '$WANT_KREL'" | tee -a ../build.log
+            exit 1
+          fi
+          if ! strings vmlinux | grep -qF "$WANT_KREL preempt"; then
+            echo "FAIL: vermagic string not found in vmlinux" | tee -a ../build.log
+            strings vmlinux | grep -m5 'preempt' | tee -a ../build.log
+            exit 1
+          fi
+          if strings vmlinux | grep -qF "$WANT_KREL+"; then
+            echo "FAIL: vermagic carries a trailing '+'" | tee -a ../build.log
+            exit 1
+          fi
+          echo "OK: vermagic = '$KREL'" | tee -a ../build.log
+          echo "KREL=$KREL" >> "$GITHUB_ENV"
 
       - name: 发布（最终）
         if: always()
