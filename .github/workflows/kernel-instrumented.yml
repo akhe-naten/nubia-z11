@@ -37,6 +37,12 @@ on:
 permissions:
   contents: write
 
+# 冷编译 25 分钟起，连续推送会堆出好几条一模一样的构建。
+# 新的一次直接进入、旧的立刻取消，队列里始终只有一条。
+concurrency:
+  group: kernel-instrumented
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -164,9 +170,10 @@ jobs:
             echo "FAIL: kernelrelease='$KREL' != '$WANT_KREL'" | tee -a ../build.log
             exit 1
           fi
-          if ! strings vmlinux | grep -qF "$WANT_KREL preempt"; then
+          # 真实串是 "<ver> SMP preempt mod_unload aarch64"（SMP 在中间，别漏）
+          if ! strings vmlinux | grep -qF "$WANT_KREL SMP preempt mod_unload aarch64"; then
             echo "FAIL: vermagic string not found in vmlinux" | tee -a ../build.log
-            strings vmlinux | grep -m5 'preempt' | tee -a ../build.log
+            strings vmlinux | grep -m5 -F 'preempt' | tee -a ../build.log
             exit 1
           fi
           if strings vmlinux | grep -qF "$WANT_KREL+"; then
