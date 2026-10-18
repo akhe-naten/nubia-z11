@@ -1,0 +1,87 @@
+name: kernel-instrumented
+
+# Reproduces the exact kernel the device runs (tag v6.19.5-msm8996) with
+# bring-up probes injected, so the silent hang inside gpiochip_add_data()
+# can be localised to a single step.
+#
+# Output is pushed to the orphan branch "dist" (Image.gz + build.log) because
+# the artifact API is not reachable from the workstation.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/ci/**"
+      - "configs/**"
+      - ".github/workflows/kernel-instrumented.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: self
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential clang lld llvm bc bison flex \
+            libssl-dev libelf-dev cpio kmod zstd python3
+
+      - name: 克隆 msm8996-mainline（与设备同版本）
+        run: |
+          git clone --depth 1 --branch v6.19.5-msm8996 \
+            https://gitlab.com/msm8996-mainline/linux.git k
+          cd k && git log -1 --oneline && nproc
+
+      - name: 应用 pmOS 同款配置
+        run: |
+          cd k
+          cp ../self/configs/msm8996-6.19.5-pmos.config .config
+          # 只要 Image，剔掉 debug info 以缩短构建时间
+          scripts/config --file .config \
+            -d DEBUG_INFO -e DEBUG_INFO_NONE \
+            -d DEBUG_INFO_BTF -d DEBUG_INFO_DWARF5 \
+            -d GDB_SCRIPTS
+          make ARCH=arm64 LLVM=1 olddefconfig
+          grep -E "^CONFIG_(PINCTRL_MSM8996|MMC_SDHCI_MSM|USB_DWC3|DEBUG_INFO_NONE|LTO)=" .config
+
+      - name: 注入探针
+        run: |
+          cd k
+          python3 ../self/tools/ci/instrument.py .
+          grep -n "Z11\[" drivers/gpio/gpiolib.c drivers/pinctrl/qcom/pinctrl-msm.c
+
+      - name: 编译 Image.gz
+        run: |
+          set -o pipefail
+          cd k
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 Image.gz 2>&1 | tee ../build.log | tail -n 30
+          ls -l arch/arm64/boot/Image.gz
+
+      - name: 发布到 dist 分支
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p out
+          [ -f k/arch/arm64/boot/Image.gz ] && cp k/arch/arm64/boot/Image.gz out/Image.gz
+          [ -f build.log ] && tail -c 400000 build.log > out/build.log
+          printf "sha=%s\nresult=%s\n" "${GITHUB_SHA}" "${{ job.status }}" > out/META.txt
+          cd out
+          git init -q
+          git config user.name "z11-ci"
+          git config user.email "z11-ci@users.noreply.github.com"
+          git checkout -q -b dist
+          git add -A
+          git commit -q -m "build ${GITHUB_SHA::7} ${{ job.status }}" || echo "nothing to commit"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -q -f origin dist
+          echo pushed
