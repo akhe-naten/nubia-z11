@@ -80,6 +80,19 @@ jobs:
           fi
           grep -E "^CONFIG_(PINCTRL_MSM8996|MMC_SDHCI_MSM|USB_DWC3|MODULES)=" k/.config | tee -a build.log
 
+      - name: 追加配置（Synaptics RMI4 触摸）
+        # 用 scripts/config 增量改，而不是改 configs/*.config —— 这样构建树缓存 key 不变，
+        # 命中缓存后只重编受影响的文件（分钟级），不必再冷编译 25 分钟。
+        run: |
+          set -eux
+          cd k
+          scripts/config --file .config \
+            -e RMI4_CORE -e RMI4_I2C \
+            -e RMI4_F01 -e RMI4_F11 -e RMI4_F12 -e RMI4_F30 -e RMI4_F34 \
+            -e INPUT_EVDEV
+          make ARCH=arm64 LLVM=1 olddefconfig
+          grep -E "^CONFIG_(RMI4|INPUT_EVDEV|INPUT_TOUCHSCREEN)" .config | tee -a ../build.log
+
       - name: 注入探针
         run: |
           set -eux
