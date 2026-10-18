@@ -90,8 +90,14 @@ jobs:
             -e RMI4_CORE -e RMI4_I2C \
             -e RMI4_F01 -e RMI4_F11 -e RMI4_F12 -e RMI4_F30 -e RMI4_F34 \
             -e INPUT_EVDEV
+          # 版本串必须和 pmOS 包里的模块一致，否则 vermagic 不匹配、所有 .ko 被拒
+          # （pmOS: uname -r = 6.19.5-postmarketos-qcom-msm8996）
+          # LOCALVERSION_AUTO 会在注入探针后给版本加 "+"，必须关掉
+          scripts/config --file .config \
+            --set-str LOCALVERSION "-postmarketos-qcom-msm8996" \
+            -d LOCALVERSION_AUTO
           make ARCH=arm64 LLVM=1 olddefconfig
-          grep -E "^CONFIG_(RMI4|INPUT_EVDEV|INPUT_TOUCHSCREEN)" .config | tee -a ../build.log
+          grep -E "^CONFIG_(RMI4|INPUT_EVDEV|INPUT_TOUCHSCREEN|LOCALVERSION)" .config | tee -a ../build.log
 
       - name: 注入探针
         run: |
