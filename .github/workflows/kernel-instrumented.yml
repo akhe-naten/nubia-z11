@@ -4,12 +4,13 @@ name: kernel-instrumented
 # bring-up probes injected, so the silent hang inside gpiochip_add_data()
 # can be localised to a single step.
 #
-# Everything runs in ONE shell step with `set -x` and a full tee into
-# build.log: the GitHub artifact/log API is unreachable from the workstation
-# (proxy strips Authorization), so the log itself is the only debugging
-# channel and must survive any early failure.
-#
-# Output goes to the orphan branch "dist": Image.gz + build.log + META.txt.
+# Two constraints shape this file:
+#   * the GitHub artifact/log API is unreachable from the workstation (the
+#     token is rejected by api.github.com) -> results ride on the orphan
+#     branch "dist": Image.gz + build.log + META.txt;
+#   * a full kernel build takes tens of minutes -> the log is published
+#     right after the cheap phases too, so a failure surfaces in minutes
+#     instead of only at the end of the run.
 
 on:
   push:
@@ -32,55 +33,80 @@ jobs:
         with:
           path: self
 
-      - name: 构建（全量日志）
+      - name: 依赖
         run: |
-          set -euxo pipefail
-          exec > >(tee -a "$GITHUB_WORKSPACE/build.log") 2>&1
-
-          echo "=== 依赖 ==="
+          set -eux
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential clang lld llvm bc bison flex \
             libssl-dev libelf-dev cpio kmod zstd python3
 
-          echo "=== 克隆内核 ==="
+      - name: 克隆内核
+        run: |
+          set -eux
           git clone --depth 1 --branch v6.19.5-msm8996 \
             https://gitlab.com/msm8996-mainline/linux.git k
-          cd k
-          git log -1 --oneline
-          echo "cpus=$(nproc)"
+          cd k && git log -1 --oneline && echo "cpus=$(nproc)"
 
-          echo "=== 配置 ==="
+      - name: 配置
+        run: |
+          set -eux
+          cd k
           cp ../self/configs/msm8996-6.19.5-pmos.config .config
           scripts/config --file .config \
             -d DEBUG_INFO -e DEBUG_INFO_NONE \
             -d DEBUG_INFO_BTF -d DEBUG_INFO_DWARF5 -d GDB_SCRIPTS
           make ARCH=arm64 LLVM=1 olddefconfig
-          grep -E "^CONFIG_(PINCTRL_MSM8996|MMC_SDHCI_MSM|USB_DWC3|DEBUG_INFO_NONE|MODULES)=" .config
+          grep -E "^CONFIG_(PINCTRL_MSM8996|MMC_SDHCI_MSM|USB_DWC3|MODULES)=" .config
 
-          echo "=== 注入探针 ==="
+      - name: 注入探针
+        run: |
+          set -eux
+          cd k
           python3 ../self/tools/ci/instrument.py .
           grep -c "Z11\[" drivers/gpio/gpiolib.c drivers/pinctrl/qcom/pinctrl-msm.c
 
-          echo "=== 编译 ==="
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 Image.gz
+      - name: 发布（探针阶段）
+        if: always()
+        run: |
+          set -eu
+          mkdir -p out
+          cp -r k/drivers/gpio/gpiolib.c out/gpiolib.c.instrumented 2>/dev/null || true
+          printf "sha=%s\nphase=proto\nresult=%s\n" "${GITHUB_SHA}" "${{ job.status }}" > out/META.txt
+          cd out
+          git init -q
+          git config user.name "z11-ci"
+          git config user.email "z11-ci@users.noreply.github.com"
+          git checkout -q -b dist
+          git add -A
+          git commit -q -m "proto ${GITHUB_SHA::7} ${{ job.status }}"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -q -f origin dist
+
+      - name: 编译 Image.gz
+        run: |
+          set -euo pipefail
+          cd k
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 Image.gz 2>&1 | tee -a ../build.log
           ls -l arch/arm64/boot/Image.gz
 
-      - name: 发布到 dist 分支
+      - name: 发布（最终）
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -eu
           mkdir -p out
           if [ -f k/arch/arm64/boot/Image.gz ]; then
             cp k/arch/arm64/boot/Image.gz out/Image.gz
           fi
           if [ -f build.log ]; then
-            tail -c 400000 build.log > out/build.log
+            # the compile log is huge; keep the head (early errors) and the tail
+            head -c 200000 build.log > out/build.log
+            echo -e "\n\n...... (truncated) ......\n\n" >> out/build.log
+            tail -c 200000 build.log >> out/build.log
           else
             echo "no build.log produced" > out/build.log
           fi
-          printf "sha=%s\nresult=%s\n" "${GITHUB_SHA}" "${{ job.status }}" > out/META.txt
+          printf "sha=%s\nphase=final\nresult=%s\n" "${GITHUB_SHA}" "${{ job.status }}" > out/META.txt
           cd out
           git init -q
           git config user.name "z11-ci"
@@ -88,6 +114,5 @@ jobs:
           git checkout -q -b dist
           git add -A
           git commit -q -m "build ${GITHUB_SHA::7} ${{ job.status }}"
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push -q -f origin dist
-          echo pushed

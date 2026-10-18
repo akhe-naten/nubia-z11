@@ -1,8 +1,9 @@
 name: build-boot-image
 
 on:
-  push:
-    branches: [main]
+  # 手动触发：本工作流只是"复用 pmOS 预编译内核重新打包 boot.img"。
+  # 真正的移植主线走 kernel-instrumented.yml（自建同版本内核）；
+  # 本机打包走 tools/build_boot.py，不需要每次 push 都跑一遍。
   workflow_dispatch:
 
 env:
