@@ -7,10 +7,14 @@ name: kernel-instrumented
 # Two constraints shape this file:
 #   * the GitHub artifact/log API is unreachable from the workstation (the
 #     token is rejected by api.github.com) -> results ride on the orphan
-#     branch "dist": Image.gz + build.log + META.txt;
-#   * a full kernel build takes tens of minutes -> the log is published
-#     right after the cheap phases too, so a failure surfaces in minutes
-#     instead of only at the end of the run.
+#     branch "dist" (Image.gz + build.log + META.txt), published by
+#     tools/ci/publish.sh;
+#   * a cold kernel build costs ~25 min -> the whole build tree "k/" is
+#     cached, so re-runs only recompile the two instrumented files (minutes).
+#
+# The very first publish is a heartbeat: if it never appears, the job did not
+# start at all (invalid workflow file, no runner, ...) rather than failing
+# inside a build step.
 
 on:
   push:
@@ -33,12 +37,19 @@ jobs:
         with:
           path: self
 
-      - name: 缓存 ccache
+      - name: 心跳（作业已启动）
+        run: |
+          set -eu
+          chmod +x self/tools/ci/publish.sh
+          echo "job started $(date -u +%FT%TZ)" > build.log
+          self/tools/ci/publish.sh start running
+
+      - name: 恢复内核构建树
         uses: actions/cache@v4
         with:
-          path: .ccache
-          key: ccache-${{ hashFiles('configs/*.config', 'tools/ci/instrument.py') }}
-          restore-keys: ccache-
+          path: k
+          key: kbuild-v1-${{ hashFiles('self/configs/*.config') }}
+          restore-keys: kbuild-v1-
 
       - name: 依赖
         run: |
@@ -46,83 +57,45 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential clang lld llvm bc bison flex \
-            libssl-dev libelf-dev cpio kmod zstd python3 ccache
-          mkdir -p /tmp/cc
-          echo "CCACHE_DIR=${GITHUB_WORKSPACE}/.ccache" >> $GITHUB_ENV
+            libssl-dev libelf-dev cpio kmod zstd python3
 
-      - name: 克隆内核
+      - name: 准备源码（命中缓存则复用，否则克隆 + 配置）
         run: |
           set -eux
-          git clone --depth 1 --branch v6.19.5-msm8996 \
-            https://gitlab.com/msm8996-mainline/linux.git k
-          cd k && git log -1 --oneline && echo "cpus=$(nproc)"
-
-      - name: 配置
-        run: |
-          set -eux
-          cd k
-          cp ../self/configs/msm8996-6.19.5-pmos.config .config
-          scripts/config --file .config \
-            -d DEBUG_INFO -e DEBUG_INFO_NONE \
-            -d DEBUG_INFO_BTF -d DEBUG_INFO_DWARF5 -d GDB_SCRIPTS
-          make ARCH=arm64 LLVM=1 olddefconfig
-          grep -E "^CONFIG_(PINCTRL_MSM8996|MMC_SDHCI_MSM|USB_DWC3|MODULES)=" .config
+          if [ -d k/.git ]; then
+            echo "cache hit: reusing build tree"
+            git -C k checkout -- .          # 撤销上一轮注入，保留 .o 产物
+          else
+            echo "cache miss: full clone + configure"
+            git clone --depth 1 --branch v6.19.5-msm8996 \
+              https://gitlab.com/msm8996-mainline/linux.git k
+            cp self/configs/msm8996-6.19.5-pmos.config k/.config
+            cd k
+            scripts/config --file .config \
+              -d DEBUG_INFO -e DEBUG_INFO_NONE \
+              -d DEBUG_INFO_BTF -d DEBUG_INFO_DWARF5 -d GDB_SCRIPTS
+            make ARCH=arm64 LLVM=1 olddefconfig
+          fi
+          grep -E "^CONFIG_(PINCTRL_MSM8996|MMC_SDHCI_MSM|USB_DWC3|MODULES)=" k/.config | tee -a build.log
 
       - name: 注入探针
         run: |
           set -eux
           cd k
-          python3 ../self/tools/ci/instrument.py .
-          grep -c "Z11\[" drivers/gpio/gpiolib.c drivers/pinctrl/qcom/pinctrl-msm.c
+          python3 ../self/tools/ci/instrument.py . 2>&1 | tee -a ../build.log
+          grep -c "Z11\[" drivers/gpio/gpiolib.c drivers/pinctrl/qcom/pinctrl-msm.c | tee -a ../build.log
 
       - name: 发布（探针阶段）
         if: always()
-        run: |
-          set -eu
-          mkdir -p out
-          cp -r k/drivers/gpio/gpiolib.c out/gpiolib.c.instrumented 2>/dev/null || true
-          printf "sha=%s\nphase=proto\nresult=%s\n" "${GITHUB_SHA}" "${{ job.status }}" > out/META.txt
-          cd out
-          git init -q
-          git config user.name "z11-ci"
-          git config user.email "z11-ci@users.noreply.github.com"
-          git checkout -q -b dist
-          git add -A
-          git commit -q -m "proto ${GITHUB_SHA::7} ${{ job.status }}"
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push -q -f origin dist
+        run: self/tools/ci/publish.sh proto "${{ job.status }}"
 
       - name: 编译 Image.gz
         run: |
           set -euo pipefail
           cd k
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 CC="ccache clang" Image.gz 2>&1 | tee -a ../build.log
-          ls -l arch/arm64/boot/Image.gz
-          ccache -s | head -5
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 Image.gz 2>&1 | tee -a ../build.log
+          ls -l arch/arm64/boot/Image.gz | tee -a ../build.log
 
       - name: 发布（最终）
         if: always()
-        run: |
-          set -eu
-          mkdir -p out
-          if [ -f k/arch/arm64/boot/Image.gz ]; then
-            cp k/arch/arm64/boot/Image.gz out/Image.gz
-          fi
-          if [ -f build.log ]; then
-            # the compile log is huge; keep the head (early errors) and the tail
-            head -c 200000 build.log > out/build.log
-            echo -e "\n\n...... (truncated) ......\n\n" >> out/build.log
-            tail -c 200000 build.log >> out/build.log
-          else
-            echo "no build.log produced" > out/build.log
-          fi
-          printf "sha=%s\nphase=final\nresult=%s\n" "${GITHUB_SHA}" "${{ job.status }}" > out/META.txt
-          cd out
-          git init -q
-          git config user.name "z11-ci"
-          git config user.email "z11-ci@users.noreply.github.com"
-          git checkout -q -b dist
-          git add -A
-          git commit -q -m "build ${GITHUB_SHA::7} ${{ job.status }}"
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push -q -f origin dist
+        run: self/tools/ci/publish.sh final "${{ job.status }}"
