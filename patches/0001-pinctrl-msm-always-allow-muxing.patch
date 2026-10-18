@@ -1,0 +1,59 @@
+pinctrl: qcom: msm: 允许复用被保留的引脚（救回触摸的 I2C12）
+
+背景（努比亚 Z11 / MSM8996）
+
+  Z11 在 gpiochip_add_data() 里逐针扫描 get_direction() 时，81~95 之间
+  有几根针一读 TLMM 配置寄存器就把整条 AXI 挂死：不是 panic（pstore
+  里一条记录都没有），是彻底卡住，最后一行探针停在 "dir 81"。当时的
+  止血手段是在设备树里加
+
+      gpio-reserved-ranges = <81 15>;
+
+  它清掉 gpiochip 的 valid_mask，扫描就会跳过这 15 根针，系统能进 /init。
+
+  但代价被忽略了：msm_pinmux_request() 复用的正是同一个 valid_mask
+
+      return gpiochip_line_is_valid(chip, offset) ? 0 : -EINVAL;
+
+  于是 81~95 的引脚复用被全部拒绝，实测日志：
+
+      msm8996-pinctrl 1010000.pinctrl: error -EINVAL: pin-87 (75ba000.i2c)
+      i2c_qup 75ba000.i2c: Error applying setting, reverse things back
+      probe of 75ba000.i2c returned -22
+
+  而 gpio87/gpio88 正是触摸 I2C12 的 SDA/SCL（gpio89 是触摸复位）。
+  这条总线一挂，syna,rmi4-i2c 永远探不到，触摸不可能亮。
+
+做法
+
+  保留区间照旧生效（扫描照样跳过 81~95），但引脚复用不再拿 valid_mask
+  当否决条件 —— 设备树里"保留"某几根针是为了不去读它们，跟这几根针
+  物理上不存在是两回事，上游这个检查防的是后者。
+
+  87/88/89 因此又能被 mux 成 I2C，而扫描仍然不会去读它们，两边都满足。
+
+---
+
+diff --git a/drivers/pinctrl/qcom/pinctrl-msm.c b/drivers/pinctrl/qcom/pinctrl-msm.c
+index e99871b..f65ed3f 100644
+--- a/drivers/pinctrl/qcom/pinctrl-msm.c
++++ b/drivers/pinctrl/qcom/pinctrl-msm.c
+@@ -148,7 +148,17 @@ static int msm_pinmux_request(struct pinctrl_dev *pctldev, unsigned offset)
+ 	struct msm_pinctrl *pctrl = pinctrl_dev_get_drvdata(pctldev);
+ 	struct gpio_chip *chip = &pctrl->chip;
+ 
+-	return gpiochip_line_is_valid(chip, offset) ? 0 : -EINVAL;
++	/*
++	 * 上游这里用 valid_mask 否决，但 valid_mask 同时也被
++	 * gpio-reserved-ranges 用来挡住 get_direction() 扫描 --
++	 * 设备树里保留 81~95 是为了不读那几根会挂死总线的针，
++	 * 不等于那几根针不能做引脚复用。触摸的 I2C12 就挂在
++	 * 87/88 上，一并被拒掉了。这里只保留告警，不再否决。
++	 */
++	if (!gpiochip_line_is_valid(chip, offset))
++		dev_dbg(pctrl->dev, "mux request on reserved line %u\n", offset);
++
++	return 0;
+ }
+ 
+ static int msm_pinmux_set_mux(struct pinctrl_dev *pctldev,

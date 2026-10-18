@@ -22,6 +22,7 @@ on:
     paths:
       - "tools/ci/**"
       - "configs/**"
+      - "patches/**"
       - ".github/workflows/kernel-instrumented.yml"
   workflow_dispatch:
     inputs:
@@ -104,6 +105,24 @@ jobs:
             make ARCH=arm64 LLVM=1 olddefconfig
           fi
           grep -E "^CONFIG_(PINCTRL_MSM8996|MMC_SDHCI_MSM|USB_DWC3|MODULES)=" k/.config | tee -a build.log
+
+      - name: 应用 pinctrl 补丁（救回触摸的 I2C12）
+        # 保留区间 81~95 挡住 AXI 挂死的同时，也把 87/88/89 的引脚复用拒了，
+        # 而 87/88 正是触摸 I2C12 的 SDA/SCL。这个补丁让保留区间只挡扫描。
+        run: |
+          set -eux
+          cd k
+          P=../self/patches/0001-pinctrl-msm-always-allow-muxing.patch
+          if git apply -R --check "$P" 2>/dev/null; then
+            echo "pinctrl patch: already applied"
+          else
+            git apply --check "$P"
+            git apply "$P"
+            echo "pinctrl patch: applied"
+          fi
+          # 打不上就白编 25 分钟，这里直接把话说清楚
+          grep -q "mux request on reserved line" drivers/pinctrl/qcom/pinctrl-msm.c
+          echo "pinctrl patch: verified in source"
 
       - name: 追加配置（Synaptics RMI4 触摸）
         # 用 scripts/config 增量改，而不是改 configs/*.config —— 这样构建树缓存 key 不变，
