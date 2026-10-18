@@ -66,7 +66,9 @@ jobs:
           set -eux
           if [ -d k/.git ]; then
             echo "cache hit: reusing build tree"
-            git -C k checkout -- .          # 撤销上一轮注入，保留 .o 产物
+            # 回到 tag 原始状态：上一轮把探针提交进了缓存树，checkout 已无法撤销。
+            # reset --hard 只动被跟踪文件，.config 与 .o 等产物保留。
+            git -C k reset --hard v6.19.5-msm8996
           else
             echo "cache miss: full clone + configure"
             git clone --depth 1 --branch v6.19.5-msm8996 \
@@ -105,6 +107,13 @@ jobs:
           cd k
           python3 ../self/tools/ci/instrument.py . 2>&1 | tee -a ../build.log
           grep -c "Z11\[" drivers/gpio/gpiolib.c drivers/pinctrl/qcom/pinctrl-msm.c | tee -a ../build.log
+          # 必须提交，否则 scripts/setlocalversion 会因"树脏"给版本追加 "+"，
+          # 导致 uname -r = 6.19.5-postmarketos-qcom-msm8996+，vermagic 与 pmOS 模块不匹配
+          git config user.name "z11-ci"
+          git config user.email "z11-ci@users.noreply.github.com"
+          git add -A
+          git commit -q -m "bring-up probes (CI)" || true
+          echo "tree clean check:" && git status --short | head -3
 
       - name: 发布（探针阶段）
         if: always()
