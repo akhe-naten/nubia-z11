@@ -38,6 +38,8 @@ jobs:
           path: self
 
       - name: 心跳（作业已启动）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
           chmod +x self/tools/ci/publish.sh
@@ -87,6 +89,8 @@ jobs:
 
       - name: 发布（探针阶段）
         if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: self/tools/ci/publish.sh proto "${{ job.status }}"
 
       - name: 编译 Image.gz
@@ -98,4 +102,6 @@ jobs:
 
       - name: 发布（最终）
         if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: self/tools/ci/publish.sh final "${{ job.status }}"

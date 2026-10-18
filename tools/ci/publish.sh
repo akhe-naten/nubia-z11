@@ -34,6 +34,14 @@ fi
 printf "sha=%s\nphase=%s\nresult=%s\ndate=%s\n" \
 	"${GITHUB_SHA:-local}" "$PHASE" "$RESULT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/META.txt"
 
+# GITHUB_TOKEN is NOT exported into step scripts by default: the calling step
+# must pass env: GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+if [ -z "$TOKEN" ]; then
+	echo "publish: no token in GITHUB_TOKEN/GH_TOKEN" >&2
+	exit 1
+fi
+
 cd "$OUT"
 git init -q
 git config user.name "z11-ci"
@@ -41,7 +49,7 @@ git config user.email "z11-ci@users.noreply.github.com"
 git checkout -q -B dist
 git add -A
 git commit -q -m "$PHASE ${GITHUB_SHA::7} $RESULT"
-git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+git remote add origin "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 git push -q -f origin dist
 
 echo "published: phase=$PHASE result=$RESULT"
