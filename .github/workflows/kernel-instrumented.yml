@@ -52,6 +52,7 @@ jobs:
       # 目标版本串必须与 pmOS 的 linux-postmarketos-qcom-msm8996 模块包完全一致，
       # 否则 /lib/modules/6.19.5-postmarketos-qcom-msm8996 下所有 .ko 都会被拒。
       WANT_KREL: 6.19.5-postmarketos-qcom-msm8996
+      KVER: -postmarketos-qcom-msm8996
       INSTRUMENT: ${{ inputs.instrument && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
@@ -136,17 +137,35 @@ jobs:
             -e INPUT_EVDEV
           # 版本串必须和 pmOS 包里的模块一致，否则 vermagic 不匹配、所有 .ko 被拒
           # （pmOS: uname -r = 6.19.5-postmarketos-qcom-msm8996）
-          # LOCALVERSION_AUTO 会在注入探针后给版本加 "+"，必须关掉
-          scripts/config --file .config \
-            --set-str LOCALVERSION "-postmarketos-qcom-msm8996" \
-            -d LOCALVERSION_AUTO
+          #
+          # 不要指望 CONFIG_LOCALVERSION：setlocalversion 读的是
+          # include/config/auto.conf 而不是 .config，
+          #
+          #   config_localversion=$(sed -n 's/^CONFIG_LOCALVERSION=\(.*\)$/\1/p' \
+          #                             include/config/auto.conf)
+          #
+          # 实测这条链在 CI 上拿不到（auto.conf 没跟着 .config 更新），
+          # 本机却拿得到 —— 同一条命令两种结果，不可靠。
+          # 改为直接在 make 命令行上给出值，它会被原样拼进 KERNELRELEASE，
+          # 同时也满足 ${LOCALVERSION+set} 的判断，不会再追加 "+"。
+          # 副作用：命令行值 + CONFIG_LOCALVERSION 会拼两次（实测拼出
+          # 6.19.5-postmarketos-qcom-msm8996-postmarketos-qcom-msm8996），
+          # 所以必须让后者彻底消失，而且得消失在 auto.conf 里，不只是 .config 里。
+          sed -i '/^CONFIG_LOCALVERSION=/d' .config
+          scripts/config --file .config -d LOCALVERSION_AUTO
           make ARCH=arm64 LLVM=1 olddefconfig
-          # 版本串的第三层：setlocalversion 里有 `elif [ "${LOCALVERSION+set}" != "set" ]`，
-          # 只要 LOCALVERSION 这个 shell 变量“未设置”（哪怕 CONFIG_LOCALVERSION 已经
-          # 非空），它就会在末尾追加 "+"。.scmversion 只影响 git 探测，治不了这一层。
-          # 唯一可靠的做法：在 make 命令行上显式写出空的 LOCALVERSION=。
-          # 因此下面凡是问内核版本的地方，都必须带 LOCALVERSION=。
-          KREL="$(make -s ARCH=arm64 LOCALVERSION= kernelrelease)"
+          # 关键：olddefconfig 只写 .config，不写 include/config/auto.conf。
+          # syncconfig 才是写 auto.conf 的那一步，漏掉它就只能等后面
+          # make Image.gz 顺带同步 —— 那时问 kernelrelease 已经太晚。
+          make ARCH=arm64 LLVM=1 syncconfig
+          # 空值在 auto.conf 里是 `CONFIG_LOCALVERSION=`（无引号），非空才带引号
+          if grep -qE '^CONFIG_LOCALVERSION=".+"' include/config/auto.conf; then
+            echo "FAIL: CONFIG_LOCALVERSION still set in auto.conf (suffix would double)" \
+              | tee -a ../build.log
+            exit 1
+          fi
+          grep -E "^CONFIG_LOCALVERSION" include/config/auto.conf | tee -a ../build.log
+          KREL="$(make -s ARCH=arm64 LOCALVERSION="$KVER" kernelrelease)"
           case "$KREL" in
             "$WANT_KREL") echo "vermagic OK: $KREL" | tee -a ../build.log ;;
             *)
@@ -179,12 +198,12 @@ jobs:
         run: |
           set -euo pipefail
           cd k
-          time make -j"$(nproc)" ARCH=arm64 LLVM=1 LOCALVERSION= Image.gz 2>&1 | tee -a ../build.log
+          time make -j"$(nproc)" ARCH=arm64 LLVM=1 LOCALVERSION="$KVER" Image.gz 2>&1 | tee -a ../build.log
           ls -l arch/arm64/boot/Image.gz | tee -a ../build.log
 
           # 三重版本串闸门：命令行参数 -> kernelrelease -> vmlinux 里真实的 vermagic 串。
           # 最后一道最关键：它验的是镜像里真被编进去的那个字符串，而不是 Make 的推导结果。
-          KREL="$(make -s ARCH=arm64 LOCALVERSION= kernelrelease)"
+          KREL="$(make -s ARCH=arm64 LOCALVERSION="$KVER" kernelrelease)"
           if [ "$KREL" != "$WANT_KREL" ]; then
             echo "FAIL: kernelrelease='$KREL' != '$WANT_KREL'" | tee -a ../build.log
             exit 1
