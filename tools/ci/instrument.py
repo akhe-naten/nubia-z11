@@ -15,6 +15,8 @@ import sys
 
 # (relative path, anchor, where, code)
 #   where = "before" | "after"   -- position relative to the anchor *line*
+#         | "replace"            -- substitute the anchor text itself
+#   code may contain \n for a multi-line block
 EDITS = [
     # ---- gpiochip_add_data_with_key(): the silent window ------------------
     ("drivers/gpio/gpiolib.c", "ret = gpiodev_add_to_list_unlocked(gdev);",
@@ -61,6 +63,40 @@ EDITS = [
      "before", 'pr_info("Z11[tlmm] gpiochip add irq=%d ngpio=%u\\n", pctrl->irq, pctrl->soc->ngpios);'),
     ("drivers/pinctrl/qcom/pinctrl-msm.c", "chained_irq_enter(chip, desc);",
      "before", 'pr_info_ratelimited("Z11[tlmm] summary IRQ fired\\n");'),
+
+    # Wrapper around msm_gpio_get_direction(): the hang happens inside the
+    # 150-iteration get_direction() loop, so the offending GPIO is identified
+    # by the last "Z11[tlmm] dir N" line.  z11_dir_limit=N on the kernel
+    # command line skips the MMIO read for offsets >= N, which turns the hang
+    # into a working boot and lets us bisect the bad pin without rebuilding.
+    ("drivers/pinctrl/qcom/pinctrl-msm.c",
+     "static const struct gpio_chip msm_gpio_template = {",
+     "before",
+     "static int z11_dir_limit = 150;\n"
+     "static int __init z11_dir_limit_setup(char *str)\n"
+     "{\n"
+     "\tint v = 150;\n"
+     "\n"
+     "\tif (kstrtoint(str, 0, &v) == 0)\n"
+     "\t\tz11_dir_limit = v;\n"
+     "\tpr_info(\"Z11[tlmm] dir_limit=%d\\n\", z11_dir_limit);\n"
+     "\treturn 1;\n"
+     "}\n"
+     "__setup(\"z11_dir_limit=\", z11_dir_limit_setup);\n"
+     "\n"
+     "static int msm_gpio_get_direction_z11(struct gpio_chip *chip,\n"
+     "\t\t\t\t\tunsigned int offset)\n"
+     "{\n"
+     "\tif (offset >= (unsigned int)z11_dir_limit)\n"
+     "\t\treturn GPIO_LINE_DIRECTION_IN;\n"
+     "\n"
+     "\tpr_info(\"Z11[tlmm] dir %u\\n\", offset);\n"
+     "\treturn msm_gpio_get_direction(chip, offset);\n"
+     "}\n"),
+    ("drivers/pinctrl/qcom/pinctrl-msm.c",
+     ".get_direction    = msm_gpio_get_direction,",
+     "replace",
+     ".get_direction    = msm_gpio_get_direction_z11,"),
 ]
 
 
@@ -94,12 +130,18 @@ def main():
 
         idx = text.find(anchor)
         ind = indent_of(text, idx)
+        # the first line takes the anchor's indentation; multi-line blocks are
+        # written with their own leading tabs already
+        body = code.split("\n")
+        block = ind + body[0] + "".join("\n" + l for l in body[1:])
         if where == "before":
             ls = text.rfind("\n", 0, idx) + 1
-            new = text[:ls] + ind + code + "\n" + text[ls:]
+            new = text[:ls] + block + "\n" + text[ls:]
+        elif where == "replace":
+            new = text[:idx] + block + text[idx + len(anchor):]
         else:
             le = text.find("\n", idx) + 1
-            new = text[:le] + ind + code + "\n" + text[le:]
+            new = text[:le] + block + "\n" + text[le:]
         cache[path] = new
         applied += 1
 
