@@ -36,6 +36,12 @@ if [ -f "$WS/k/.config" ]; then
 	cp "$WS/k/.config" "$OUT/kernel.config"
 fi
 
+# 内核模块回传（qcom_fg 等）：设备侧直接 insmod 验证，不需要换 boot.img。
+# 编译时开了 MODULE_COMPRESS_ZSTD，所以产物是 .ko.zst。
+for f in "$WS"/k/drivers/power/supply/qcom_fg.ko*; do
+	[ -f "$f" ] && cp "$f" "$OUT/" && echo "published module: $(basename "$f")"
+done
+
 printf "sha=%s\nphase=%s\nresult=%s\ndate=%s\n" \
 	"${GITHUB_SHA:-local}" "$PHASE" "$RESULT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/META.txt"
 if [ -f "$WS/k/.config" ]; then

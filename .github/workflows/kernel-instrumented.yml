@@ -51,8 +51,10 @@ jobs:
     env:
       # 目标版本串必须与 pmOS 的 linux-postmarketos-qcom-msm8996 模块包完全一致，
       # 否则 /lib/modules/6.19.5-postmarketos-qcom-msm8996 下所有 .ko 都会被拒。
-      WANT_KREL: 6.19.5-postmarketos-qcom-msm8996
-      KVER: -postmarketos-qcom-msm8996
+      # 2026-10-20：设备基线已回到 v46（pmOS 官方包内核），其 uname -r 是**纯 6.19.5**。
+      # 之前带 -postmarketos-qcom-msm8996 后缀的构建产物与设备模块树对不上，改成纯版本串。
+      WANT_KREL: 6.19.5
+      KVER: ""
       INSTRUMENT: ${{ inputs.instrument && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
@@ -134,7 +136,8 @@ jobs:
           scripts/config --file .config \
             -e RMI4_CORE -e RMI4_I2C \
             -e RMI4_F01 -e RMI4_F11 -e RMI4_F12 -e RMI4_F30 -e RMI4_F34 \
-            -e INPUT_EVDEV
+            -e INPUT_EVDEV \
+            -m BATTERY_QCOM_FG
           # 版本串必须和 pmOS 包里的模块一致，否则 vermagic 不匹配、所有 .ko 被拒
           # （pmOS: uname -r = 6.19.5-postmarketos-qcom-msm8996）
           #
@@ -175,6 +178,34 @@ jobs:
           esac
           grep -E "^CONFIG_(RMI4|INPUT_EVDEV|INPUT_TOUCHSCREEN|LOCALVERSION)" .config | tee -a ../build.log
           echo "KREL=$KREL" >> "$GITHUB_ENV"
+
+      - name: 给 qcom_fg 打补丁（PMI8996 走 rev3 SRAM 布局）
+        # 真机 PMIC 是 PMI8996，但 DT 里写的是 qcom,pmi8994-fg，
+        # 驱动按 compatible 选 SRAM 布局 → 用错寄存器 → mem-avail 不来 → probe -110。
+        # 这里把 pmi8994-fg 直接映射到 pmi8996_data，这样**不必改 DT、不必换 boot**，
+        # 只要 insmod 这个模块就能验证 rev3 布局是否成立。
+        # 另外内建驱动已占用 "qcom-fg" 名字，模块再注册会 -EEXIST，所以改名。
+        run: |
+          set -eux
+          cd k
+          python3 - <<'PY'
+          import pathlib, sys
+          p = pathlib.Path("drivers/power/supply/qcom_fg.c")
+          s = p.read_text()
+          before = s
+          s = s.replace('{ .compatible = "qcom,pmi8994-fg", .data = &pmi8994_data }',
+                        '{ .compatible = "qcom,pmi8994-fg", .data = &pmi8996_data }')
+          s = s.replace('.name = "qcom-fg"', '.name = "qcom-fg-probe"')
+          if s == before:
+              sys.exit("patch: nothing changed")
+          if '&pmi8996_data }' not in s:
+              sys.exit("patch: compatible replacement failed")
+          if 'qcom-fg-probe' not in s:
+              sys.exit("patch: driver rename failed")
+          p.write_text(s)
+          print("qcom_fg patched OK")
+          PY
+          grep -n "pmi8994-fg\|qcom-fg-probe" drivers/power/supply/qcom_fg.c | tee -a ../build.log
 
       - name: 注入探针（INSTRUMENT 输入为 true 才做）
         # 刻意不 commit：探针保持为未提交改动，下一次命中缓存时用 checkout -- . 就能撤销。
@@ -220,6 +251,17 @@ jobs:
           fi
           echo "OK: vermagic = '$KREL'" | tee -a ../build.log
           echo "KREL=$KREL" >> "$GITHUB_ENV"
+
+      - name: 编译模块（只为拿到 qcom_fg.ko）
+        # 设备侧内建驱动 probe 失败后设备处于未绑定状态，
+        # 直接 insmod 这个改了名的模块就能重新 probe，不需要换 boot.img。
+        run: |
+          set -euo pipefail
+          cd k
+          time make -j"$(nproc)" ARCH=arm64 LLVM=1 LOCALVERSION="$KVER" modules 2>&1 | tee -a ../build.log
+          ls -l drivers/power/supply/qcom_fg.ko* | tee -a ../build.log
+          # 模块的 vermagic 必须和内核一致，否则 insmod 直接被拒
+          modinfo drivers/power/supply/qcom_fg.ko* 2>/dev/null | grep -E "vermagic|name" | tee -a ../build.log || true
 
       - name: 发布（最终）
         if: always()
