@@ -179,33 +179,15 @@ jobs:
           grep -E "^CONFIG_(RMI4|INPUT_EVDEV|INPUT_TOUCHSCREEN|LOCALVERSION)" .config | tee -a ../build.log
           echo "KREL=$KREL" >> "$GITHUB_ENV"
 
-      - name: 给 qcom_fg 打补丁（PMI8996 走 rev3 SRAM 布局）
-        # 真机 PMIC 是 PMI8996，但 DT 里写的是 qcom,pmi8994-fg，
-        # 驱动按 compatible 选 SRAM 布局 → 用错寄存器 → mem-avail 不来 → probe -110。
-        # 这里把 pmi8994-fg 直接映射到 pmi8996_data，这样**不必改 DT、不必换 boot**，
-        # 只要 insmod 这个模块就能验证 rev3 布局是否成立。
-        # 另外内建驱动已占用 "qcom-fg" 名字，模块再注册会 -EEXIST，所以改名。
+      - name: 给 qcom-wled 打补丁（OVP 中断风暴根因修复）
+        # wled_ovp_irq 实测 22,400 次/秒、累计 7000 万次，phoc 49 分钟吃掉 25 分钟 CPU。
+        # 根因是 enable_irq 不配对 + OVP 自动串数检测的正反馈。补丁用显式状态位
+        # 保证 enable/disable 成对，并把自动检测限速到 2 Hz。不改任何 DT 参数。
         run: |
           set -eux
-          cd k
-          python3 - <<'PY'
-          import pathlib, sys
-          p = pathlib.Path("drivers/power/supply/qcom_fg.c")
-          s = p.read_text()
-          before = s
-          s = s.replace('{ .compatible = "qcom,pmi8994-fg", .data = &pmi8994_data }',
-                        '{ .compatible = "qcom,pmi8994-fg", .data = &pmi8996_data }')
-          s = s.replace('.name = "qcom-fg"', '.name = "qcom-fg-probe"')
-          if s == before:
-              sys.exit("patch: nothing changed")
-          if '&pmi8996_data }' not in s:
-              sys.exit("patch: compatible replacement failed")
-          if 'qcom-fg-probe' not in s:
-              sys.exit("patch: driver rename failed")
-          p.write_text(s)
-          print("qcom_fg patched OK")
-          PY
-          grep -n "pmi8994-fg\|qcom-fg-probe" drivers/power/supply/qcom_fg.c | tee -a ../build.log
+          python3 ../self/tools/ci/patch_wled.py
+          grep -n "ovp_irq_enabled\|ovp_last_jiffies" drivers/leds/backlight/qcom-wled.c \
+            drivers/video/backlight/qcom-wled.c 2>/dev/null | head -20 | tee -a ../build.log
 
       - name: 注入探针（INSTRUMENT 输入为 true 才做）
         # 刻意不 commit：探针保持为未提交改动，下一次命中缓存时用 checkout -- . 就能撤销。
