@@ -185,6 +185,7 @@ jobs:
         # 保证 enable/disable 成对，并把自动检测限速到 2 Hz。不改任何 DT 参数。
         run: |
           set -eux
+          cd k
           # 失败要把原因写进 build.log：CI 的 artifact/log API 在工作站拿不到
           python3 ../self/tools/ci/patch_wled.py 2>&1 | tee -a ../build.log
           test ${PIPESTATUS[0]} -eq 0
