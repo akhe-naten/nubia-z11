@@ -185,9 +185,12 @@ jobs:
         # 保证 enable/disable 成对，并把自动检测限速到 2 Hz。不改任何 DT 参数。
         run: |
           set -eux
-          python3 ../self/tools/ci/patch_wled.py
-          grep -n "ovp_irq_enabled\|ovp_last_jiffies" drivers/leds/backlight/qcom-wled.c \
-            drivers/video/backlight/qcom-wled.c 2>/dev/null | head -20 | tee -a ../build.log
+          # 失败要把原因写进 build.log：CI 的 artifact/log API 在工作站拿不到
+          python3 ../self/tools/ci/patch_wled.py 2>&1 | tee -a ../build.log
+          test ${PIPESTATUS[0]} -eq 0
+          F=$(ls drivers/leds/backlight/qcom-wled.c drivers/video/backlight/qcom-wled.c 2>/dev/null | head -1)
+          echo "wled file: $F" | tee -a ../build.log
+          grep -n "ovp_irq_enabled\|ovp_last_jiffies" "$F" | tee -a ../build.log
 
       - name: 注入探针（INSTRUMENT 输入为 true 才做）
         # 刻意不 commit：探针保持为未提交改动，下一次命中缓存时用 checkout -- . 就能撤销。
